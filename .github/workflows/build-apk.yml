@@ -1,0 +1,56 @@
+name: Build Beamer APK
+on:
+  workflow_dispatch:
+  push:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project (repo root, or inside a zip)
+        run: |
+          if [ -f settings.gradle.kts ]; then
+            DIR=.
+          else
+            ZIP=$(ls Beamer*.zip 2>/dev/null | head -n1)
+            if [ -z "$ZIP" ]; then ZIP=$(ls *.zip | head -n1); fi
+            echo "Using $ZIP"
+            unzip -q "$ZIP" -d src_project
+            DIR=$(dirname "$(find src_project -name settings.gradle.kts | head -n1)")
+          fi
+          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+
+      - name: Install Android SDK pieces (platform, NDK, CMake)
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Fetch whisper.cpp (native speech engine)
+        run: |
+          rm -rf "$PROJECT_DIR/app/src/main/cpp/whisper.cpp"
+          git clone --depth 1 --branch v1.7.4 https://github.com/ggerganov/whisper.cpp "$PROJECT_DIR/app/src/main/cpp/whisper.cpp"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+
+      - name: Build debug APK
+        run: cd "$PROJECT_DIR" && gradle :app:assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Beamer-debug
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" Beamer.apk
+          gh release create "beamer-${{ github.run_number }}" Beamer.apk --title "Beamer build ${{ github.run_number }}" --notes "Debug APK"
